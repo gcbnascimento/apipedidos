@@ -4,8 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       issue_key:
-        description: 'Jira issue key (ex.: SNJ-123)'
         required: true
+        type: string
+      instruction:
+        required: false
         type: string
 
 jobs:
