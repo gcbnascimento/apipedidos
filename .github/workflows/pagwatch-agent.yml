@@ -37,7 +37,7 @@ jobs:
             echo "__EOF__"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Descobrir o ID do Copilot coding agent
+      - name: Descobrir o ID do coding agent
         id: copilot
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,10 +53,10 @@ jobs:
               }
             }' | tee /tmp/actors.json
 
-          COPILOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent" or .login=="Copilot" or .login=="copilot") | .id' /tmp/actors.json | head -n1)
+          COPILOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="openai-code-agent" or .login=="anthropic-code-agent" or .login=="copilot-swe-agent" or .login=="Copilot") | .id' /tmp/actors.json | head -n1)
 
           if [ -z "$COPILOT_ID" ]; then
-            echo "::error::Copilot nao apareceu como assignavel. Veja a lista de atores acima (login/typename)."
+            echo "::error::Nenhum coding agent assignavel encontrado. Veja a lista de atores acima (login/typename)."
             exit 1
           fi
           echo "id=$COPILOT_ID" >> "$GITHUB_OUTPUT"
@@ -90,7 +90,7 @@ jobs:
             }' --jq '.data.createIssue.issue.id')
           echo "id=$ISSUE_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Atribuir a issue ao Copilot
+      - name: Atribuir a issue ao coding agent
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -103,4 +103,4 @@ jobs:
                 assignable { ... on Issue { number } }
               }
             }'
-          echo "Issue atribuida ao Copilot. Ele vai implementar e abrir um PR."
+          echo "Issue atribuida ao coding agent. Ele vai implementar e abrir um PR."
