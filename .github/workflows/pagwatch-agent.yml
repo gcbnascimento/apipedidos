@@ -92,7 +92,7 @@ jobs:
 
       - name: Atribuir a issue ao coding agent
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.COPILOT_PAT }}
         run: |
           gh api graphql \
             -f assignableId="${{ steps.issue.outputs.id }}" \
