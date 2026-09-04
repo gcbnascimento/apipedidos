@@ -4,17 +4,100 @@ on:
   workflow_dispatch:
     inputs:
       issue_key:
+        description: 'Jira card ID (ex.: SNJ-123)'
         required: true
         type: string
       instruction:
+        description: 'Instrução de implementação para o Copilot'
         required: false
         type: string
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 jobs:
-  refine:
+  delegate-to-copilot:
     runs-on: ubuntu-latest
     steps:
-      - name: Echo do card recebido
+      - name: Preparar instrução
+        id: prep
         run: |
-          echo "PagWatch Agent acionado pela ponte."
-          echo "issue_key recebido: ${{ github.event.inputs.issue_key }}"
+          INSTR="${{ github.event.inputs.instruction }}"
+          if [ -z "$INSTR" ]; then
+            INSTR="Implementação solicitada pelo card ${{ github.event.inputs.issue_key }}."
+          fi
+          {
+            echo "title=[${{ github.event.inputs.issue_key }}] PagWatch: implementação"
+            echo "body<<__EOF__"
+            echo "$INSTR"
+            echo ""
+            echo "_Card: ${{ github.event.inputs.issue_key }} — issue criada automaticamente pela ponte PagWatch._"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Descobrir o ID do Copilot coding agent
+        id: copilot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COPILOT_ID=$(gh api graphql -f owner='${{ github.repository_owner }}' \
+            -f name='${{ github.event.repository.name }}' -f query='
+            query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100) {
+                  nodes { login __typename ... on Bot { id } ... on User { id } }
+                }
+              }
+            }' --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id')
+
+          if [ -z "$COPILOT_ID" ]; then
+            echo "::error::Copilot coding agent nao esta disponivel/assignavel neste repositorio. Habilite em Settings > Copilot."
+            exit 1
+          fi
+          echo "id=$COPILOT_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Descobrir o ID do repositório
+        id: repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO_ID=$(gh api graphql -f owner='${{ github.repository_owner }}' \
+            -f name='${{ github.event.repository.name }}' -f query='
+            query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) { id }
+            }' --jq '.data.repository.id')
+          echo "id=$REPO_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Criar a issue
+        id: issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ISSUE_ID=$(gh api graphql \
+            -f repositoryId="${{ steps.repo.outputs.id }}" \
+            -f title="${{ steps.prep.outputs.title }}" \
+            -f body="${{ steps.prep.outputs.body }}" \
+            -f query='
+            mutation($repositoryId: ID!, $title: String!, $body: String!) {
+              createIssue(input: {repositoryId: $repositoryId, title: $title, body: $body}) {
+                issue { id number url }
+              }
+            }' --jq '.data.createIssue.issue.id')
+          echo "id=$ISSUE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Atribuir a issue ao Copilot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api graphql \
+            -f assignableId="${{ steps.issue.outputs.id }}" \
+            -f actorId="${{ steps.copilot.outputs.id }}" \
+            -f query='
+            mutation($assignableId: ID!, $actorId: ID!) {
+              replaceActorsForAssignable(input: {assignableId: $assignableId, actorIds: [$actorId]}) {
+                assignable { ... on Issue { number } }
+              }
+            }'
+          echo "Issue atribuida ao Copilot. Ele vai implementar e abrir um PR."
