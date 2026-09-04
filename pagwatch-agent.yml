@@ -1,0 +1,18 @@
+name: PagWatch Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_key:
+        description: 'Jira issue key (ex.: SNJ-123)'
+        required: true
+        type: string
+
+jobs:
+  refine:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo do card recebido
+        run: |
+          echo "PagWatch Agent acionado pela ponte."
+          echo "issue_key recebido: ${{ github.event.inputs.issue_key }}"
