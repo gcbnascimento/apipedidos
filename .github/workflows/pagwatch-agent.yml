@@ -42,7 +42,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          COPILOT_ID=$(gh api graphql -f owner='${{ github.repository_owner }}' \
+          echo "=== Atores assignaveis no repo ==="
+          gh api graphql -f owner='${{ github.repository_owner }}' \
             -f name='${{ github.event.repository.name }}' -f query='
             query($owner: String!, $name: String!) {
               repository(owner: $owner, name: $name) {
@@ -50,10 +51,12 @@ jobs:
                   nodes { login __typename ... on Bot { id } ... on User { id } }
                 }
               }
-            }' --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent") | .id')
+            }' | tee /tmp/actors.json
+
+          COPILOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent" or .login=="Copilot" or .login=="copilot") | .id' /tmp/actors.json | head -n1)
 
           if [ -z "$COPILOT_ID" ]; then
-            echo "::error::Copilot coding agent nao esta disponivel/assignavel neste repositorio. Habilite em Settings > Copilot."
+            echo "::error::Copilot nao apareceu como assignavel. Veja a lista de atores acima (login/typename)."
             exit 1
           fi
           echo "id=$COPILOT_ID" >> "$GITHUB_OUTPUT"
