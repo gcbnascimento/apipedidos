@@ -29,6 +29,7 @@ on:
 
 permissions:
   contents: read
+  copilot-requests: write   # autentica o engine copilot sem PAT (usa o token do Actions)
 
 engine: copilot
 
