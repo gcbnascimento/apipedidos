@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       instruction:
-        description: 'Instrução de implementação para o Copilot'
+        description: 'Instrução de implementação para o coding agent'
         required: false
         type: string
 
@@ -20,6 +20,8 @@ permissions:
 jobs:
   delegate-to-copilot:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.CODING_AGENT_TOKEN }}
     steps:
       - name: Preparar instrução
         id: prep
@@ -39,8 +41,6 @@ jobs:
 
       - name: Descobrir o ID do coding agent
         id: copilot
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           echo "=== Atores assignaveis no repo ==="
           gh api graphql -f owner='${{ github.repository_owner }}' \
@@ -56,15 +56,13 @@ jobs:
           COPILOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="openai-code-agent" or .login=="anthropic-code-agent" or .login=="copilot-swe-agent" or .login=="Copilot") | .id' /tmp/actors.json | head -n1)
 
           if [ -z "$COPILOT_ID" ]; then
-            echo "::error::Nenhum coding agent assignavel encontrado. Veja a lista de atores acima (login/typename)."
+            echo "::error::Nenhum coding agent assignavel encontrado. Veja a lista de atores acima."
             exit 1
           fi
           echo "id=$COPILOT_ID" >> "$GITHUB_OUTPUT"
 
       - name: Descobrir o ID do repositório
         id: repo
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           REPO_ID=$(gh api graphql -f owner='${{ github.repository_owner }}' \
             -f name='${{ github.event.repository.name }}' -f query='
@@ -75,8 +73,6 @@ jobs:
 
       - name: Criar a issue
         id: issue
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           ISSUE_ID=$(gh api graphql \
             -f repositoryId="${{ steps.repo.outputs.id }}" \
@@ -91,16 +87,25 @@ jobs:
           echo "id=$ISSUE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Atribuir a issue ao coding agent
-        env:
-          GH_TOKEN: ${{ secrets.COPILOT_PAT }}
         run: |
           gh api graphql \
+            -H 'GraphQL-Features: issues_copilot_assignment_api_support,coding_agent_model_selection' \
             -f assignableId="${{ steps.issue.outputs.id }}" \
             -f actorId="${{ steps.copilot.outputs.id }}" \
+            -f repositoryId="${{ steps.repo.outputs.id }}" \
+            -f instruction="${{ github.event.inputs.instruction }}" \
             -f query='
-            mutation($assignableId: ID!, $actorId: ID!) {
-              replaceActorsForAssignable(input: {assignableId: $assignableId, actorIds: [$actorId]}) {
-                assignable { ... on Issue { number } }
+            mutation($assignableId: ID!, $actorId: ID!, $repositoryId: ID!, $instruction: String!) {
+              replaceActorsForAssignable(input: {
+                assignableId: $assignableId
+                actorIds: [$actorId]
+                agentAssignment: {
+                  targetRepositoryId: $repositoryId
+                  baseRef: "master"
+                  customInstructions: $instruction
+                }
+              }) {
+                assignable { ... on Issue { number url } }
               }
             }'
-          echo "Issue atribuida ao coding agent. Ele vai implementar e abrir um PR."
+          echo "Issue atribuida ao coding agent."
