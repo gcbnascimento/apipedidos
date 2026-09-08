@@ -44,6 +44,10 @@ tools:
     toolsets: [default]
 
 safe-outputs:
+  env:
+    JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+    JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+    JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
   threat-detection: false
   jira-add-comment:
     max: 1
