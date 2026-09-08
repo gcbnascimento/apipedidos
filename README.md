@@ -18,3 +18,8 @@ Alguns endpoints criados:
 .../categorias(relacionando com produtos)
 
 .../clientes(relacionando com endereço, cidade, estado e telefone)
+
+## Sobre
+
+Esta API REST foi desenvolvida com Spring Boot para gerenciar pedidos de produtos,
+clientes, endereços, categorias e pagamentos.
