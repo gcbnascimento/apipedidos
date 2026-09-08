@@ -1,23 +1,4 @@
 ---
-# ═══════════════════════════════════════════════════════════════════════════
-# PagWatch Refinement Agent (gh-aw REAL)
-#
-# Refina o card do Jira com o engine do Copilot e comenta o resultado no Jira
-# via safe-output NATIVO de Jira (jira-add-comment). Não usa GitHub Models.
-#
-# A ponte (microserviço) lê o card no Jira e dispara este workflow passando o
-# conteúdo como inputs — o agente NÃO lê o Jira, só recebe o conteúdo pronto.
-#
-# COMPILAR (na máquina/CI, uma vez):
-#   gh aw compile pagwatch-refinement
-# Commite o .md e o .lock.yml gerado no repo de destino (.github/workflows/).
-#
-# SECRETS no repo de destino:
-#   JIRA_BASE_URL   = https://jiraps-sandbox-943.atlassian.net
-#   JIRA_USER_EMAIL = seu email do Jira
-#   JIRA_API_TOKEN  = API token do Jira
-# ═══════════════════════════════════════════════════════════════════════════
-
 on:
   workflow_dispatch:
     inputs:
@@ -30,7 +11,7 @@ on:
 permissions:
   contents: read
   actions: read
-  copilot-requests: write   # autentica o engine copilot sem PAT (usa o token do Actions)
+  copilot-requests: write
 
 engine: copilot
 
@@ -39,7 +20,6 @@ network:
     - defaults
     - "*.atlassian.net"
 
-# Comentário no Jira via safe-output nativo (credenciais nunca vão ao agente).
 safe-outputs:
   env:
     JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
@@ -61,13 +41,29 @@ Você refina o card do Jira `${{ inputs.issue_key }}` com base no conteúdo abai
 
 ## Tarefa
 
-Avalie se o card está claro o suficiente para implementação, considerando:
-1. Objetivo único e acionável.
-2. Componente/área afetada.
-3. Resultado esperado observável.
+Avalie se o card está claro o suficiente para implementação.
 
-Considere também os **checks objetivos**: o tipo deve ser `feature` ou `fix`, e a
-descrição não pode estar vazia.
+### Checks objetivos (determinísticos)
+- **Tipo**: aceite qualquer tipo de desenvolvimento do Jira — `Story`, `Task`, `Bug`,
+  `Improvement`, `feature`, `fix` (case-insensitive). Só rejeite tipos claramente
+  não-implementáveis (ex.: `Epic`). O tipo do Jira NÃO precisa ser "feature"/"fix":
+  ele será mapeado para o prefixo da branch na implementação (ver abaixo).
+- **Descrição**: não pode estar vazia.
+
+### Checks de clareza (template do card)
+Verifique se o card responde, de forma clara, às seções esperadas:
+1. **O que será feito?** — objetivo único e acionável.
+2. **Onde?** — componente/área/repositório afetado.
+3. **Resultado esperado** — como validar que ficou pronto (observável).
+4. **Dependências** — se houver.
+5. **Critérios de aceite (DoD)**.
+
+Um card é considerado refinado quando os checks objetivos passam E as seções 1, 2 e 3
+estão presentes e claras (Dependências e DoD reforçam, mas 1–3 são o mínimo).
+
+### Mapeamento tipo → prefixo de branch (para a implementação futura)
+- `Bug` → `fix/`
+- Qualquer outro tipo de desenvolvimento (`Story`, `Task`, `Improvement`, `feature`) → `feature/`
 
 ## Saída
 
@@ -77,7 +73,8 @@ Use a ferramenta `jira_add_comment` (issue_key = `${{ inputs.issue_key }}`) para
 - Se estiver claro: comece com **"✅ PRONTO PARA IMPLEMENTAR"** e resuma em 1-2 frases o
   que será feito; ao final, peça a confirmação: "Comente `@pagwatch-agent pode implementar`
   para eu seguir."
-- Se faltar algo: comece com **"📝 REFINAMENTO NECESSÁRIO"** e liste os itens/perguntas
-  específicos que faltam (objetivo, área afetada, resultado esperado, tipo/descrição).
+- Se faltar algo: comece com **"📝 REFINAMENTO NECESSÁRIO"** e liste, de forma específica,
+  quais seções do template faltam ou estão ambíguas (o que será feito, onde, resultado
+  esperado, dependências, DoD). NÃO rejeite o card só por causa do tipo do Jira.
 
 Não faça mais nada além de postar esse comentário.
