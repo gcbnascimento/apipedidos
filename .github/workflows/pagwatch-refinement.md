@@ -43,6 +43,7 @@ tools:
     toolsets: [default]
 
 safe-outputs:
+  threat-detection: false
   jira-add-comment:
     max: 1
 
