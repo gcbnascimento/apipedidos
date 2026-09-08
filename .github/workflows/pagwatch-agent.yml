@@ -1,111 +1,100 @@
+# Workflow de REFINAMENTO (Opção A: o workflow refina com IA e comenta no Jira direto).
+#
+# Recebe do microserviço (ponte): issue_key, issue_type, summary, description, comments.
+# 1. Usa GitHub Models (gh models run) para avaliar clareza e gerar o texto de refinamento.
+# 2. Comenta o resultado no card do Jira via API REST.
+#
+# COMO USAR (no repo de destino):
+#   1. Copie para .github/workflows/pagwatch-agent.yml (branch default), SUBSTITUINDO o antigo.
+#   2. Secrets necessários (Settings > Secrets and variables > Actions):
+#        JIRA_BASE_URL = https://jiraps-sandbox-943.atlassian.net
+#        JIRA_EMAIL    = seu email do Jira
+#        JIRA_TOKEN    = API token do Jira
+#   3. A ponte já dispara este workflow com os inputs abaixo.
+
 name: PagWatch Agent
 
 on:
   workflow_dispatch:
     inputs:
-      issue_key:
-        description: 'Jira card ID (ex.: SNJ-123)'
-        required: true
-        type: string
-      instruction:
-        description: 'Instrução de implementação para o coding agent'
-        required: false
-        type: string
+      issue_key:   { description: 'Jira card ID', required: true,  type: string }
+      issue_type:  { description: 'Tipo do card', required: false, type: string }
+      summary:     { description: 'Título',       required: false, type: string }
+      description: { description: 'Descrição',     required: false, type: string }
+      comments:    { description: 'Comentários',   required: false, type: string }
 
 permissions:
   contents: read
-  issues: write
-  pull-requests: write
+  models: read          # necessário para o gh models run
 
 jobs:
-  delegate-to-copilot:
+  refine:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.CODING_AGENT_TOKEN }}
     steps:
-      - name: Preparar instrução
-        id: prep
+      - name: Refinar o card com IA (GitHub Models)
+        id: ai
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_TYPE: ${{ github.event.inputs.issue_type }}
+          SUMMARY: ${{ github.event.inputs.summary }}
+          DESCRIPTION: ${{ github.event.inputs.description }}
+          COMMENTS: ${{ github.event.inputs.comments }}
         run: |
-          INSTR="${{ github.event.inputs.instruction }}"
-          if [ -z "$INSTR" ]; then
-            INSTR="Implementação solicitada pelo card ${{ github.event.inputs.issue_key }}."
-          fi
-          {
-            echo "title=[${{ github.event.inputs.issue_key }}] PagWatch: implementação"
-            echo "body<<__EOF__"
-            echo "$INSTR"
-            echo ""
-            echo "_Card: ${{ github.event.inputs.issue_key }} — issue criada automaticamente pela ponte PagWatch._"
-            echo "__EOF__"
-          } >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          gh extension install github/gh-models || true
 
-      - name: Descobrir o ID do coding agent
-        id: copilot
+          PROMPT=$(cat <<EOF
+          Você é um agente de refinamento de cards do Jira. Avalie se o card está claro o
+          suficiente para implementação. Considere: objetivo único e acionável, componente/área
+          afetada, e resultado esperado observável.
+
+          Card:
+          - Tipo: ${ISSUE_TYPE}
+          - Título: ${SUMMARY}
+          - Descrição: ${DESCRIPTION}
+          - Comentários: ${COMMENTS}
+
+          Responda em português, curto e objetivo:
+          - Se estiver claro: comece com "PRONTO PARA IMPLEMENTAR" e resuma o que será feito.
+          - Se faltar algo: comece com "REFINAMENTO NECESSÁRIO" e liste as perguntas/itens que faltam.
+          EOF
+          )
+
+          echo "$PROMPT" | gh models run openai/gpt-4o-mini > /tmp/refino.txt || {
+            echo "::error::Falha ao chamar o modelo (GitHub Models)."; exit 1;
+          }
+
+          echo "=== Refino gerado ==="
+          cat /tmp/refino.txt
+
+      - name: Comentar o refinamento no Jira
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+          CARD_ID: ${{ github.event.inputs.issue_key }}
         run: |
-          echo "=== Atores assignaveis no repo ==="
-          gh api graphql -f owner='${{ github.repository_owner }}' \
-            -f name='${{ github.event.repository.name }}' -f query='
-            query($owner: String!, $name: String!) {
-              repository(owner: $owner, name: $name) {
-                suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100) {
-                  nodes { login __typename ... on Bot { id } ... on User { id } }
-                }
-              }
-            }' | tee /tmp/actors.json
+          set -euo pipefail
+          REFINO=$(cat /tmp/refino.txt)
 
-          COPILOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="openai-code-agent" or .login=="anthropic-code-agent" or .login=="copilot-swe-agent" or .login=="Copilot") | .id' /tmp/actors.json | head -n1)
+          # Monta o corpo ADF (Atlassian Document Format) com jq, escapando o texto.
+          BODY=$(jq -n --arg t "$REFINO" '{
+            body: {
+              type: "doc", version: 1,
+              content: [ { type: "paragraph", content: [ { type: "text", text: $t } ] } ]
+            }
+          }')
 
-          if [ -z "$COPILOT_ID" ]; then
-            echo "::error::Nenhum coding agent assignavel encontrado. Veja a lista de atores acima."
+          HTTP=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
+            -u "$JIRA_EMAIL:$JIRA_TOKEN" \
+            -H "Accept: application/json" -H "Content-Type: application/json" \
+            -X POST "$JIRA_BASE_URL/rest/api/3/issue/$CARD_ID/comment" \
+            -d "$BODY")
+
+          echo "Jira HTTP: $HTTP"
+          if [ "$HTTP" != "201" ]; then
+            echo "::error::Falha ao comentar no Jira (HTTP $HTTP)."
+            cat /tmp/resp.json || true
             exit 1
           fi
-          echo "id=$COPILOT_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Descobrir o ID do repositório
-        id: repo
-        run: |
-          REPO_ID=$(gh api graphql -f owner='${{ github.repository_owner }}' \
-            -f name='${{ github.event.repository.name }}' -f query='
-            query($owner: String!, $name: String!) {
-              repository(owner: $owner, name: $name) { id }
-            }' --jq '.data.repository.id')
-          echo "id=$REPO_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Criar a issue
-        id: issue
-        run: |
-          ISSUE_ID=$(gh api graphql \
-            -f repositoryId="${{ steps.repo.outputs.id }}" \
-            -f title="${{ steps.prep.outputs.title }}" \
-            -f body="${{ steps.prep.outputs.body }}" \
-            -f query='
-            mutation($repositoryId: ID!, $title: String!, $body: String!) {
-              createIssue(input: {repositoryId: $repositoryId, title: $title, body: $body}) {
-                issue { id number url }
-              }
-            }' --jq '.data.createIssue.issue.id')
-          echo "id=$ISSUE_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Atribuir a issue ao coding agent
-        run: |
-          gh api graphql \
-            -H 'GraphQL-Features: issues_copilot_assignment_api_support,coding_agent_model_selection' \
-            -f assignableId="${{ steps.issue.outputs.id }}" \
-            -f actorId="${{ steps.copilot.outputs.id }}" \
-            -f repositoryId="${{ steps.repo.outputs.id }}" \
-            -f instruction="${{ github.event.inputs.instruction }}" \
-            -f query='
-            mutation($assignableId: ID!, $actorId: ID!, $repositoryId: ID!, $instruction: String!) {
-              replaceActorsForAssignable(input: {
-                assignableId: $assignableId
-                actorIds: [$actorId]
-                agentAssignment: {
-                  targetRepositoryId: $repositoryId
-                  baseRef: "master"
-                  customInstructions: $instruction
-                }
-              }) {
-                assignable { ... on Issue { number url } }
-              }
-            }'
-          echo "Issue atribuida ao coding agent."
+          echo "Comentário postado no card $CARD_ID."
