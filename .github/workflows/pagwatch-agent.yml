@@ -1,16 +1,14 @@
-# Workflow de REFINAMENTO (Opção A: o workflow refina com IA e comenta no Jira direto).
+# Workflow de IMPLEMENTAÇÃO: recebe o conteúdo do card da ponte, cria uma issue com a
+# instrução (derivada da descrição do card) e ATRIBUI ao coding agent (que abre PR).
 #
-# Recebe do microserviço (ponte): issue_key, issue_type, summary, description, comments.
-# 1. Usa GitHub Models (gh models run) para avaliar clareza e gerar o texto de refinamento.
-# 2. Comenta o resultado no card do Jira via API REST.
+# Disparado pela ponte quando o último comentário do card autoriza ("@pagwatch-agent
+# pode implementar"). Recebe os MESMOS inputs do workflow de refinamento.
 #
 # COMO USAR (no repo de destino):
-#   1. Copie para .github/workflows/pagwatch-agent.yml (branch default), SUBSTITUINDO o antigo.
-#   2. Secrets necessários (Settings > Secrets and variables > Actions):
-#        JIRA_BASE_URL = https://jiraps-sandbox-943.atlassian.net
-#        JIRA_EMAIL    = seu email do Jira
-#        JIRA_TOKEN    = API token do Jira
-#   3. A ponte já dispara este workflow com os inputs abaixo.
+#   1. .github/workflows/pagwatch-agent.yml (branch default), SUBSTITUINDO o antigo.
+#   2. Secret: CODING_AGENT_TOKEN (PAT de usuário com Copilot; atribuir agent exige
+#      token de usuário, não o token do Actions).
+#   3. Copilot coding agent habilitado no repositório.
 
 name: PagWatch Agent
 
@@ -25,76 +23,127 @@ on:
 
 permissions:
   contents: read
-  models: read          # necessário para o gh models run
+  issues: write
+  pull-requests: write
 
 jobs:
-  refine:
+  delegate-to-copilot:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.CODING_AGENT_TOKEN }}
     steps:
-      - name: Refinar o card com IA (GitHub Models)
-        id: ai
+      - name: Preparar instrução (a partir do card)
+        id: prep
         env:
-          GH_TOKEN: ${{ github.token }}
+          ISSUE_KEY: ${{ github.event.inputs.issue_key }}
           ISSUE_TYPE: ${{ github.event.inputs.issue_type }}
           SUMMARY: ${{ github.event.inputs.summary }}
           DESCRIPTION: ${{ github.event.inputs.description }}
-          COMMENTS: ${{ github.event.inputs.comments }}
         run: |
           set -euo pipefail
-          gh extension install github/gh-models || true
+          # Prefixo da branch conforme o tipo do card (Bug -> fix, demais -> feature).
+          TYPE_LC=$(echo "${ISSUE_TYPE:-}" | tr '[:upper:]' '[:lower:]')
+          if [ "$TYPE_LC" = "bug" ] || [ "$TYPE_LC" = "fix" ]; then PREFIX="fix"; else PREFIX="feature"; fi
 
-          PROMPT=$(cat <<EOF
-          Você é um agente de refinamento de cards do Jira. Avalie se o card está claro o
-          suficiente para implementação. Considere: objetivo único e acionável, componente/área
-          afetada, e resultado esperado observável.
+          {
+            echo "title=[${ISSUE_KEY}] ${SUMMARY}"
+            echo "prefix=${PREFIX}"
+            echo "body<<__EOF__"
+            echo "Implementar o card ${ISSUE_KEY}."
+            echo ""
+            echo "Título: ${SUMMARY}"
+            echo ""
+            echo "Descrição / requisito:"
+            echo "${DESCRIPTION}"
+            echo ""
+            echo "Crie a implementação em uma branch ${PREFIX}/${ISSUE_KEY}-<resumo> a partir da branch base e abra um Pull Request."
+            echo "_Issue criada automaticamente pela ponte PagWatch a partir do card ${ISSUE_KEY}._"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
 
-          Card:
-          - Tipo: ${ISSUE_TYPE}
-          - Título: ${SUMMARY}
-          - Descrição: ${DESCRIPTION}
-          - Comentários: ${COMMENTS}
+      - name: Descobrir o ID do coding agent
+        id: copilot
+        run: |
+          echo "=== Atores assignaveis no repo ==="
+          gh api graphql -f owner='${{ github.repository_owner }}' \
+            -f name='${{ github.event.repository.name }}' -f query='
+            query($owner: String!, $name: String!) {
+              repository(owner: $owner, name: $name) {
+                suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100) {
+                  nodes { login __typename ... on Bot { id } ... on User { id } }
+                }
+              }
+            }' | tee /tmp/actors.json
 
-          Responda em português, curto e objetivo:
-          - Se estiver claro: comece com "PRONTO PARA IMPLEMENTAR" e resuma o que será feito.
-          - Se faltar algo: comece com "REFINAMENTO NECESSÁRIO" e liste as perguntas/itens que faltam.
-          EOF
-          )
+          COPILOT_ID=$(jq -r '.data.repository.suggestedActors.nodes[] | select(.login=="openai-code-agent" or .login=="anthropic-code-agent" or .login=="copilot-swe-agent" or .login=="Copilot") | .id' /tmp/actors.json | head -n1)
 
-          echo "$PROMPT" | gh models run openai/gpt-4o-mini > /tmp/refino.txt || {
-            echo "::error::Falha ao chamar o modelo (GitHub Models)."; exit 1;
-          }
+          if [ -z "$COPILOT_ID" ]; then
+            echo "::error::Nenhum coding agent assignavel encontrado. Veja a lista acima."
+            exit 1
+          fi
+          echo "id=$COPILOT_ID" >> "$GITHUB_OUTPUT"
 
-          echo "=== Refino gerado ==="
-          cat /tmp/refino.txt
+      - name: Descobrir o ID do repositório
+        id: repo
+        run: |
+          REPO_ID=$(gh api graphql -f owner='${{ github.repository_owner }}' \
+            -f name='${{ github.event.repository.name }}' -f query='
+            query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { id } }' \
+            --jq '.data.repository.id')
+          echo "id=$REPO_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Comentar o refinamento no Jira
+      - name: Criar a issue
+        id: issue
+        run: |
+          ISSUE_ID=$(gh api graphql \
+            -f repositoryId="${{ steps.repo.outputs.id }}" \
+            -f title="${{ steps.prep.outputs.title }}" \
+            -f body="${{ steps.prep.outputs.body }}" \
+            -f query='
+            mutation($repositoryId: ID!, $title: String!, $body: String!) {
+              createIssue(input: {repositoryId: $repositoryId, title: $title, body: $body}) {
+                issue { id number url }
+              }
+            }' --jq '.data.createIssue.issue.id')
+          echo "id=$ISSUE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Atribuir a issue ao coding agent
+        run: |
+          gh api graphql \
+            -f assignableId="${{ steps.issue.outputs.id }}" \
+            -f actorId="${{ steps.copilot.outputs.id }}" \
+            -f query='
+            mutation($assignableId: ID!, $actorId: ID!) {
+              replaceActorsForAssignable(input: {assignableId: $assignableId, actorIds: [$actorId]}) {
+                assignable { ... on Issue { number } }
+              }
+            }'
+          echo "Issue atribuida ao coding agent. Ele vai implementar e abrir um PR."
+
+      - name: Comentar no Jira que a implementação começou
         env:
           JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
-          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
-          JIRA_TOKEN: ${{ secrets.JIRA_TOKEN }}
+          JIRA_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+          JIRA_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           CARD_ID: ${{ github.event.inputs.issue_key }}
         run: |
           set -euo pipefail
-          REFINO=$(cat /tmp/refino.txt)
+          TEXT="🚀 Implementação iniciada. O agente está trabalhando no card ${CARD_ID} e abrirá um Pull Request ao concluir."
 
-          # Monta o corpo ADF (Atlassian Document Format) com jq, escapando o texto.
-          BODY=$(jq -n --arg t "$REFINO" '{
-            body: {
-              type: "doc", version: 1,
-              content: [ { type: "paragraph", content: [ { type: "text", text: $t } ] } ]
-            }
+          BODY=$(jq -n --arg t "$TEXT" '{
+            body: { type: "doc", version: 1,
+              content: [ { type: "paragraph", content: [ { type: "text", text: $t } ] } ] }
           }')
 
           HTTP=$(curl -sS -o /tmp/resp.json -w "%{http_code}" \
             -u "$JIRA_EMAIL:$JIRA_TOKEN" \
             -H "Accept: application/json" -H "Content-Type: application/json" \
-            -X POST "$JIRA_BASE_URL/rest/api/3/issue/$CARD_ID/comment" \
-            -d "$BODY")
+            -X POST "$JIRA_BASE_URL/rest/api/3/issue/$CARD_ID/comment" -d "$BODY")
 
           echo "Jira HTTP: $HTTP"
           if [ "$HTTP" != "201" ]; then
-            echo "::error::Falha ao comentar no Jira (HTTP $HTTP)."
+            echo "::warning::Nao foi possivel comentar no Jira (HTTP $HTTP). A implementacao segue."
             cat /tmp/resp.json || true
-            exit 1
+          else
+            echo "Comentario 'implementacao iniciada' postado no card $CARD_ID."
           fi
-          echo "Comentário postado no card $CARD_ID."
